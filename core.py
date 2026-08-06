@@ -178,20 +178,48 @@ def montar_prompt_usuario(nivel: str, campo: str, interesse: str) -> str:
     )
 
 
+class AdaptacaoIncompleta(Exception):
+    """A resposta da IA foi cortada antes de terminar o JSON (limite de tokens atingido)."""
+    def __init__(self, texto_bruto):
+        self.texto_bruto = texto_bruto
+        super().__init__(
+            "A resposta da IA foi cortada antes de terminar (limite de tokens atingido). "
+            "Tente novamente — se persistir, encurte um pouco o texto da atividade original."
+        )
+
+
+class AdaptacaoJsonInvalido(Exception):
+    """A resposta da IA não é um JSON válido, mas não parece ter sido cortada por tokens."""
+    def __init__(self, texto_bruto, erro_original):
+        self.texto_bruto = texto_bruto
+        self.erro_original = erro_original
+        super().__init__(f"A resposta da IA não veio em um JSON válido: {erro_original}")
+
+
 def adaptar_atividade(api_key: str, texto_original: str, nivel: str = "1",
-                       campo: str = "", interesse: str = "", modelo: str = None) -> dict:
+                       campo: str = "", interesse: str = "", modelo: str = None,
+                       max_tokens: int = 4096) -> dict:
     client = anthropic.Anthropic(api_key=api_key)
     modelo = modelo or MODELO_ANTHROPIC
     prompt_usuario = "ATIVIDADE ORIGINAL:\n" + texto_original + "\n\n" + montar_prompt_usuario(nivel, campo, interesse)
     resposta = client.messages.create(
         model=modelo,
-        max_tokens=2000,
+        max_tokens=max_tokens,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt_usuario}],
     )
     bruto = "".join(bloco.text for bloco in resposta.content if bloco.type == "text")
     bruto = re.sub(r"```json|```", "", bruto).strip()
-    return json.loads(bruto)
+
+    try:
+        return json.loads(bruto)
+    except json.JSONDecodeError as e:
+        # Se o motivo de parada foi "max_tokens", a resposta quase certamente
+        # foi cortada no meio de uma string/objeto — é isso que causa o erro
+        # "Unterminated string" ou "Expecting ',' delimiter" etc.
+        if getattr(resposta, "stop_reason", None) == "max_tokens":
+            raise AdaptacaoIncompleta(bruto) from e
+        raise AdaptacaoJsonInvalido(bruto, e) from e
 
 
 # ---------------------------------------------------------------------------

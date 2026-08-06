@@ -289,6 +289,18 @@ elif st.session_state.step == 2:
                         st.session_state.titulo = adaptado.get("titulo", "")
                     st.session_state.pdf_bytes = None
                     ir_para(3)
+                except core.AdaptacaoIncompleta as e:
+                    st.error(
+                        "⚠️ A resposta da IA foi cortada antes de terminar (a atividade original "
+                        "pode ser muito longa). Clique em **✨ Adaptar atividade** novamente — "
+                        "se continuar acontecendo, tente reduzir o texto original."
+                    )
+                    with st.expander("Ver resposta bruta recebida (para diagnóstico)"):
+                        st.code(e.texto_bruto)
+                except core.AdaptacaoJsonInvalido as e:
+                    st.error(f"Erro ao interpretar a resposta da IA: {e.erro_original}")
+                    with st.expander("Ver resposta bruta recebida (para diagnóstico)"):
+                        st.code(e.texto_bruto)
                 except Exception as e:
                     st.error(f"Erro ao adaptar a atividade: {e}")
 
