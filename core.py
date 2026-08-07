@@ -14,6 +14,11 @@ import requests
 import anthropic
 import pdfplumber
 import docx  # python-docx
+from docx import Document
+from docx.shared import Pt, Cm, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml.ns import qn
 from PIL import Image
 
 from reportlab.lib.pagesizes import A4
@@ -509,5 +514,228 @@ def gerar_pdf_bytes(adaptado: dict, titulo_atividade: str, nome_aluno: str = "",
 
     rodape_atribuicao()
     c.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Geração de DOCX (editável pelo professor) — retorna bytes
+# ---------------------------------------------------------------------------
+def _config_pagina_a4(document, margem_cm=2.0):
+    for secao in document.sections:
+        secao.page_height = Cm(29.7)
+        secao.page_width = Cm(21.0)
+        secao.top_margin = Cm(margem_cm)
+        secao.bottom_margin = Cm(margem_cm)
+        secao.left_margin = Cm(margem_cm)
+        secao.right_margin = Cm(margem_cm)
+
+
+def _estilo_base(document):
+    estilo = document.styles["Normal"]
+    estilo.font.name = "Calibri"
+    estilo.font.size = Pt(12)
+
+
+def _celula_texto(cell, texto, tamanho=11, negrito=False, cor=None, alinhamento=None):
+    cell.text = ""
+    p = cell.paragraphs[0]
+    if alinhamento is not None:
+        p.alignment = alinhamento
+    run = p.add_run(str(texto))
+    run.font.size = Pt(tamanho)
+    run.font.bold = negrito
+    if cor:
+        run.font.color.rgb = RGBColor(*cor)
+    return p
+
+
+def _titulo_secao_docx(document, texto):
+    p = document.add_paragraph()
+    p.paragraph_format.space_before = Pt(14)
+    p.paragraph_format.space_after = Pt(4)
+    run = p.add_run(texto.upper())
+    run.font.bold = True
+    run.font.size = Pt(11)
+    run.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
+    # linha inferior simples via borda de parágrafo
+    pPr = p._p.get_or_add_pPr()
+    pBdr = pPr.makeelement(qn("w:pBdr"), {})
+    bottom = pPr.makeelement(qn("w:bottom"), {
+        qn("w:val"): "single", qn("w:sz"): "6", qn("w:space"): "1", qn("w:color"): "999999",
+    })
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+    return p
+
+
+def gerar_docx_bytes(adaptado: dict, titulo_atividade: str, nome_aluno: str = "",
+                      nivel: str = "1", usar_pictogramas: bool = True) -> bytes:
+    """Gera um .docx editável: página 1 = atividade do aluno, página 2 = orientações do professor."""
+    nivel_info = NIVEIS[nivel]
+    document = Document()
+    _config_pagina_a4(document)
+    _estilo_base(document)
+
+    # ---------- CABEÇALHO ----------
+    p = document.add_paragraph()
+    r = p.add_run("TEA · ATIVIDADE ADAPTADA")
+    r.font.size = Pt(8)
+    r.font.bold = True
+    r.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
+
+    tabela_cab = document.add_table(rows=1, cols=2)
+    tabela_cab.autofit = True
+    _celula_texto(tabela_cab.cell(0, 0), f"Nome: {nome_aluno or '_' * 35}", tamanho=12)
+    _celula_texto(tabela_cab.cell(0, 1),
+                   f"Data: ____/____/______      Turma: ___________      Nível: {nivel_info['sigla']}",
+                   tamanho=11, alinhamento=WD_ALIGN_PARAGRAPH.RIGHT)
+
+    # ---------- TÍTULO ----------
+    titulo_p = document.add_heading(level=1)
+    titulo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    titulo_run = titulo_p.add_run(titulo_atividade)
+    titulo_run.font.size = Pt(20)
+    titulo_run.font.color.rgb = RGBColor(0x08, 0x50, 0x41)
+
+    document.add_paragraph()
+
+    # ---------- PASSOS (tabela editável: nº | pictograma | instrução) ----------
+    passos = adaptado.get("passos", [])
+    if passos:
+        tabela = document.add_table(rows=0, cols=3)
+        tabela.style = "Table Grid"
+        tabela.alignment = WD_TABLE_ALIGNMENT.CENTER
+        tabela.columns[0].width = Cm(1.2)
+        tabela.columns[1].width = Cm(3.0)
+        tabela.columns[2].width = Cm(12.8)
+
+        for passo in passos:
+            linha = tabela.add_row()
+            _celula_texto(linha.cells[0], str(passo.get("numero", "")), tamanho=13, negrito=True,
+                          alinhamento=WD_ALIGN_PARAGRAPH.CENTER)
+
+            cel_picto = linha.cells[1]
+            cel_picto.text = ""
+            picto_kw = passo.get("pictograma", "")
+            imagem_bytes = None
+            if usar_pictogramas and picto_kw:
+                _, imagem_bytes = arasaac_melhor_pictograma(picto_kw)
+            par_picto = cel_picto.paragraphs[0]
+            par_picto.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if imagem_bytes:
+                try:
+                    par_picto.add_run().add_picture(io.BytesIO(imagem_bytes), width=Cm(2.2))
+                except Exception:
+                    imagem_bytes = None
+            if not imagem_bytes:
+                run_p = par_picto.add_run(picto_kw or "")
+                run_p.font.size = Pt(8)
+                run_p.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+
+            _celula_texto(linha.cells[2], passo.get("texto", ""), tamanho=13, negrito=True)
+
+        document.add_paragraph()
+
+    # ---------- BANCO DE PALAVRAS ----------
+    banco = adaptado.get("banco_palavras") or []
+    if banco:
+        p = document.add_paragraph()
+        r = p.add_run("BANCO DE PALAVRAS")
+        r.font.bold = True
+        r.font.size = Pt(10)
+        p2 = document.add_paragraph()
+        r2 = p2.add_run("   ".join(banco))
+        r2.font.bold = True
+        r2.font.size = Pt(14)
+        document.add_paragraph()
+
+    # ---------- GRADE DE CAÇA-PALAVRAS ----------
+    grade = (adaptado.get("grade_caca_palavras") or "").strip()
+    if grade:
+        for linha_txt in grade.split("\n"):
+            if not linha_txt.strip():
+                continue
+            p = document.add_paragraph()
+            r = p.add_run(linha_txt)
+            r.font.name = "Courier New"
+            r.font.size = Pt(13)
+            r.font.bold = True
+        document.add_paragraph()
+
+    # ---------- ZONA DE RESPOSTA ----------
+    zona = adaptado.get("zona_resposta")
+    if zona:
+        p = document.add_paragraph()
+        r = p.add_run(zona.get("descricao", "Espaço para resposta"))
+        r.font.size = Pt(9)
+        r.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+        tabela_zona = document.add_table(rows=1, cols=1)
+        tabela_zona.style = "Table Grid"
+        cel = tabela_zona.cell(0, 0)
+        cel.text = "\n" * 6  # espaço em branco para o aluno escrever/desenhar
+
+    # ---------- QUEBRA DE PÁGINA → ORIENTAÇÕES DO PROFESSOR ----------
+    document.add_page_break()
+
+    o = adaptado.get("orientacoes", {})
+    titulo_prof = document.add_heading(level=1)
+    r = titulo_prof.add_run("Orientações Pedagógicas")
+    r.font.size = Pt(18)
+    r.font.color.rgb = RGBColor(0x08, 0x50, 0x41)
+
+    sub = f"{titulo_atividade} · {nivel_info['nome']}"
+    if adaptado.get("campo_experiencia"):
+        sub += f" · {adaptado['campo_experiencia']}"
+    p_sub = document.add_paragraph()
+    r_sub = p_sub.add_run(sub)
+    r_sub.font.size = Pt(10)
+    r_sub.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+    objetivo = o.get("objetivo") or adaptado.get("objetivo_pedagogico", "")
+    if objetivo:
+        _titulo_secao_docx(document, "Objetivo")
+        document.add_paragraph(objetivo)
+
+    como = o.get("como_apresentar") or []
+    if como:
+        _titulo_secao_docx(document, "Como apresentar ao aluno")
+        for passo in como:
+            document.add_paragraph(passo, style="List Number")
+
+    dificuldades = o.get("dificuldades") or []
+    if dificuldades:
+        _titulo_secao_docx(document, "Dificuldades e estratégias")
+        tabela_d = document.add_table(rows=1, cols=2)
+        tabela_d.style = "Table Grid"
+        _celula_texto(tabela_d.cell(0, 0), "Dificuldade", tamanho=10, negrito=True)
+        _celula_texto(tabela_d.cell(0, 1), "Estratégia", tamanho=10, negrito=True)
+        for item in dificuldades:
+            linha = tabela_d.add_row()
+            _celula_texto(linha.cells[0], item.get("problema", ""), tamanho=10)
+            _celula_texto(linha.cells[1], item.get("estrategia", ""), tamanho=10)
+
+    materiais = o.get("materiais") or []
+    if materiais:
+        _titulo_secao_docx(document, "Materiais e recursos")
+        for m in materiais:
+            document.add_paragraph(m, style="List Bullet")
+
+    caa = o.get("caa", "")
+    if caa:
+        _titulo_secao_docx(document, "Uso de CAA")
+        document.add_paragraph(caa)
+
+    if usar_pictogramas:
+        document.add_paragraph()
+        p_rodape = document.add_paragraph()
+        r_rodape = p_rodape.add_run(
+            "Pictogramas: ARASAAC (arasaac.org) — CC BY-NC-SA 4.0 — Governo de Aragón"
+        )
+        r_rodape.font.size = Pt(7)
+        r_rodape.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+
+    buffer = io.BytesIO()
+    document.save(buffer)
     buffer.seek(0)
     return buffer.getvalue()

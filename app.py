@@ -104,6 +104,7 @@ def _init_state():
         "raw_text": "",
         "adaptado": None,
         "pdf_bytes": None,
+        "docx_bytes": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -118,6 +119,15 @@ STEP_LABELS = {1: "Importar", 2: "Configurar", 3: "Revisar", 4: "Baixar PDF"}
 def ir_para(n):
     st.session_state.step = n
     st.rerun()
+
+
+def nova_atividade():
+    """Limpa os dados da atividade atual e volta para a Etapa 1, mantendo a API key."""
+    for chave in ("nivel", "campo", "interesse", "titulo", "aluno", "usar_picto",
+                  "raw_text", "adaptado", "pdf_bytes", "docx_bytes"):
+        del st.session_state[chave]
+    _init_state()
+    ir_para(1)
 
 
 def render_stepper():
@@ -311,7 +321,7 @@ elif st.session_state.step == 3:
     adaptado = st.session_state.adaptado
     st.markdown('<div class="tea-card">', unsafe_allow_html=True)
     st.markdown('<div class="ctit">Revisar</div>', unsafe_allow_html=True)
-    st.markdown('<div class="csub">Confira o conteúdo gerado antes de baixar o PDF</div>',
+    st.markdown('<div class="csub">Confira o conteúdo gerado antes de baixar os arquivos</div>',
                 unsafe_allow_html=True)
 
     if not adaptado:
@@ -359,8 +369,8 @@ elif st.session_state.step == 3:
 elif st.session_state.step == 4:
     adaptado = st.session_state.adaptado
     st.markdown('<div class="tea-card">', unsafe_allow_html=True)
-    st.markdown('<div class="ctit">Baixar PDF</div>', unsafe_allow_html=True)
-    st.markdown('<div class="csub">O arquivo é gerado no momento do clique — nada fica salvo em servidor</div>',
+    st.markdown('<div class="ctit">Baixar arquivos</div>', unsafe_allow_html=True)
+    st.markdown('<div class="csub">Os arquivos são gerados no momento do clique — nada fica salvo em servidor</div>',
                 unsafe_allow_html=True)
 
     if adaptado:
@@ -372,8 +382,8 @@ elif st.session_state.step == 4:
         st.write(f"**Interesse especial:** {st.session_state.interesse or '—'}")
 
     st.markdown(
-        '<div class="ibanner">📄 Gera um PDF com <b>2 páginas A4</b>: '
-        'atividade do aluno e orientações do professor.</div>',
+        '<div class="ibanner">📄 <b>PDF</b>: pronto para impressão (2 páginas A4). '
+        '📝 <b>DOCX</b>: mesmo conteúdo em Word, para o professor editar antes de imprimir.</div>',
         unsafe_allow_html=True,
     )
     st.markdown("</div>", unsafe_allow_html=True)
@@ -383,24 +393,50 @@ elif st.session_state.step == 4:
         if st.button("← Voltar para edição", use_container_width=True):
             ir_para(3)
     with col2:
-        if st.button("Gerar PDF", type="primary", use_container_width=True, disabled=not adaptado):
-            with st.spinner("Gerando PDF... buscando pictogramas no ARASAAC" if st.session_state.usar_picto
-                             else "Gerando PDF..."):
+        if st.button("Gerar arquivos", type="primary", use_container_width=True, disabled=not adaptado):
+            spinner_msg = ("Gerando PDF e DOCX... buscando pictogramas no ARASAAC"
+                            if st.session_state.usar_picto else "Gerando PDF e DOCX...")
+            with st.spinner(spinner_msg):
+                titulo_final = st.session_state.titulo or adaptado.get("titulo", "Atividade Adaptada")
                 st.session_state.pdf_bytes = core.gerar_pdf_bytes(
                     adaptado,
-                    titulo_atividade=st.session_state.titulo or adaptado.get("titulo", "Atividade Adaptada"),
+                    titulo_atividade=titulo_final,
+                    nome_aluno=st.session_state.aluno,
+                    nivel=st.session_state.nivel,
+                    usar_pictogramas=st.session_state.usar_picto,
+                )
+                st.session_state.docx_bytes = core.gerar_docx_bytes(
+                    adaptado,
+                    titulo_atividade=titulo_final,
                     nome_aluno=st.session_state.aluno,
                     nivel=st.session_state.nivel,
                     usar_pictogramas=st.session_state.usar_picto,
                 )
 
-    if st.session_state.pdf_bytes:
+    if st.session_state.pdf_bytes or st.session_state.docx_bytes:
         nome_arquivo = (st.session_state.titulo or "atividade").lower()
         nome_arquivo = "".join(ch if ch.isalnum() else "-" for ch in nome_arquivo).strip("-") or "atividade"
-        st.download_button(
-            "⬇️ Baixar PDF",
-            data=st.session_state.pdf_bytes,
-            file_name=f"{nome_arquivo}-adaptada.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
+
+        col_pdf, col_docx = st.columns(2)
+        with col_pdf:
+            if st.session_state.pdf_bytes:
+                st.download_button(
+                    "⬇️ Baixar PDF",
+                    data=st.session_state.pdf_bytes,
+                    file_name=f"{nome_arquivo}-adaptada.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+        with col_docx:
+            if st.session_state.docx_bytes:
+                st.download_button(
+                    "⬇️ Baixar DOCX",
+                    data=st.session_state.docx_bytes,
+                    file_name=f"{nome_arquivo}-adaptada.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔄 Gerar nova atividade", use_container_width=True):
+            nova_atividade()
