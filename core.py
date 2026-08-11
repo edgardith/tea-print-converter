@@ -201,6 +201,77 @@ class AdaptacaoJsonInvalido(Exception):
         super().__init__(f"A resposta da IA não veio em um JSON válido: {erro_original}")
 
 
+def _como_lista_str(valor):
+    """Garante uma lista de strings, mesmo que a IA tenha retornado um formato diferente."""
+    if isinstance(valor, list):
+        return [str(x) for x in valor if x is not None and str(x).strip()]
+    if isinstance(valor, str) and valor.strip():
+        return [valor.strip()]
+    return []
+
+
+def _como_dict(valor):
+    return valor if isinstance(valor, dict) else {}
+
+
+def normalizar_adaptado(dados) -> dict:
+    """Corrige pequenos desvios de formato que a IA às vezes comete (ex: um campo que
+    deveria ser objeto vir como texto simples), para blindar a geração de PDF/DOCX
+    contra AttributeError/TypeError."""
+    dados = dados if isinstance(dados, dict) else {}
+    out = {}
+
+    out["titulo"] = str(dados.get("titulo") or "Atividade Adaptada")
+    out["campo_experiencia"] = str(dados.get("campo_experiencia") or "")
+    out["nivel"] = str(dados.get("nivel") or "1")
+    out["objetivo_pedagogico"] = str(dados.get("objetivo_pedagogico") or "")
+
+    passos_norm = []
+    for i, p in enumerate(dados.get("passos") or [], start=1):
+        if isinstance(p, dict):
+            passos_norm.append({
+                "numero": p.get("numero", i),
+                "texto": str(p.get("texto") or ""),
+                "pictograma": str(p.get("pictograma") or ""),
+            })
+        elif isinstance(p, str) and p.strip():
+            passos_norm.append({"numero": i, "texto": p.strip(), "pictograma": ""})
+    out["passos"] = passos_norm
+
+    out["banco_palavras"] = _como_lista_str(dados.get("banco_palavras"))
+    out["grade_caca_palavras"] = str(dados.get("grade_caca_palavras") or "")
+
+    zona = dados.get("zona_resposta")
+    if isinstance(zona, dict):
+        out["zona_resposta"] = {
+            "tipo": str(zona.get("tipo") or "linhas"),
+            "descricao": str(zona.get("descricao") or "Espaço para resposta"),
+        }
+    elif isinstance(zona, str) and zona.strip():
+        out["zona_resposta"] = {"tipo": "linhas", "descricao": zona.strip()}
+    else:
+        out["zona_resposta"] = {"tipo": "linhas", "descricao": "Espaço para resposta"}
+
+    o = _como_dict(dados.get("orientacoes"))
+    dificuldades_norm = []
+    for d in (o.get("dificuldades") or []):
+        if isinstance(d, dict):
+            dificuldades_norm.append({
+                "problema": str(d.get("problema") or ""),
+                "estrategia": str(d.get("estrategia") or ""),
+            })
+        elif isinstance(d, str) and d.strip():
+            dificuldades_norm.append({"problema": d.strip(), "estrategia": ""})
+    out["orientacoes"] = {
+        "objetivo": str(o.get("objetivo") or ""),
+        "como_apresentar": _como_lista_str(o.get("como_apresentar")),
+        "dificuldades": dificuldades_norm,
+        "materiais": _como_lista_str(o.get("materiais")),
+        "caa": str(o.get("caa") or ""),
+    }
+    return out
+
+
 def adaptar_atividade(api_key: str, texto_original: str, nivel: str = "1",
                        campo: str = "", interesse: str = "", modelo: str = None,
                        max_tokens: int = 4096) -> dict:
@@ -217,14 +288,13 @@ def adaptar_atividade(api_key: str, texto_original: str, nivel: str = "1",
     bruto = re.sub(r"```json|```", "", bruto).strip()
 
     try:
-        return json.loads(bruto)
+        dados = json.loads(bruto)
     except json.JSONDecodeError as e:
-        # Se o motivo de parada foi "max_tokens", a resposta quase certamente
-        # foi cortada no meio de uma string/objeto — é isso que causa o erro
-        # "Unterminated string" ou "Expecting ',' delimiter" etc.
         if getattr(resposta, "stop_reason", None) == "max_tokens":
             raise AdaptacaoIncompleta(bruto) from e
         raise AdaptacaoJsonInvalido(bruto, e) from e
+
+    return normalizar_adaptado(dados)
 
 
 # ---------------------------------------------------------------------------
